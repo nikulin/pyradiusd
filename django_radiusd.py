@@ -1,6 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2.7
 #*- coding: utf-8 -*
 
+import argparse
 import logging
 import six
 import sys
@@ -8,20 +9,46 @@ import SocketServer
 from StringIO import StringIO
 from pyrad import tools, dictionary
 from pyrad.packet import AuthPacket, AccessRequest, AccessAccept, AccessReject
+from django.conf import settings
+
+from main import settings as project_settings
+
+
+settings.configure(default_settings=project_settings,
+    LOGGING_CONFIG=None,
+    CACHES={'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}},
+    DEFAULT_INDEX_TABLESPACE='',
+    DEFAULT_TABLESPACE='',
+    TRANSACTIONS_MANAGED=False,  # only for 1.6! Use the AUTOCOMMIT key in DATABASES entries instead.
+    AUTH_USER_MODEL='auth.User',
+    DATABASE_ROUTERS=[],
+    PASSWORD_HASHERS=('django.contrib.auth.hashers.PBKDF2PasswordHasher', ),
+    DEBUG=True,
+    INSTALLED_APPS=('django.contrib.auth', ),
+    MIDDLEWARE_CLASSES=('django.contrib.auth.middleware.AuthenticationMiddleware', ),
+    AUTHENTICATION_BACKENDS=('django.contrib.auth.backends.ModelBackend', ),
+)
+
+from django.contrib.auth import authenticate
+
+
+nas_secret, log_file, debug = None, 'radius.log', False
+
+parser = argparse.ArgumentParser(description='Simple RADIUS server')
+parser.add_argument( '-l', '--log', type=str, dest='log_file', help='log file')
+parser.add_argument( '-s', '--secret', type=str, dest='nas_secret', help='RADIUS secret')
+parser.add_argument( '--debug', action='store_true', dest='debug', help='run in debug mode')
+args = vars(parser.parse_args())
+
+if not nas_secret:
+    assert settings.RADIUS_SECRET, "RADIUS_SECRET should be present in settings file or in args"
+    nas_secret = settings.RADIUS_SECRET
 
 DICTIONARY = u'''
 ATTRIBUTE User-Name 1 string
 ATTRIBUTE User-Password 2 string encrypt=1
 ATTRIBUTE NAS-Identifier 32 string
 '''
-
-NAS_SECRET = 'put CORRECT radius_secret from your config file here'
-USERS = {
-    'superuser': 'resurepus068',
-    'admin': 'nimda955',
-    'editor': 'rotide395',
-    'guest': 'tseug164',
-}
 
 
 def getLogger(name, logfile, level=logging.INFO):
@@ -37,7 +64,9 @@ def getLogger(name, logfile, level=logging.INFO):
     return logger
 
 
-radiuslog = getLogger("radius", "radius.log", level=logging.INFO)
+radiuslog = getLogger("radiusd", log_file, level=logging.DEBUG if debug else logging.INFO)
+
+
 class AuthPacket2(AuthPacket):
     def __init__(self, code=AccessRequest, id=None, secret=six.b(''), authenticator=None, **attributes):
         AuthPacket.__init__(self, code, id, secret, authenticator, **attributes)
@@ -71,12 +100,9 @@ class AuthPacket2(AuthPacket):
             return None
 
 
-class UDPHandler(SocketServer.DatagramRequestHandler):
+class RADIUSHandler(SocketServer.DatagramRequestHandler):
     """
-    This class works similar to the TCP handler class, except that
-    self.request consists of a pair of data and client socket, and since
-    there is no connection the client address must be given explicitly
-    when sending data back via sendto().
+    Very simply RADIUS packets handler
     """
 
     def send_reject(self, req, socket, err):
@@ -92,13 +118,15 @@ class UDPHandler(SocketServer.DatagramRequestHandler):
         radiuslog.debug("[Auth] send an authentication accept,user[%s],nas[%s]" % (req.get_username(), req.get_realm()))
 
     def handle(self):
+        pkt, socket = None, None
         try:
             data = self.request[0].strip()
             socket = self.request[1]
             dict = dictionary.Dictionary(StringIO(DICTIONARY))
-            pkt = AuthPacket2(packet=data, dict=dict, secret=NAS_SECRET)
+            pkt = AuthPacket2(packet=data, dict=dict, secret=nas_secret)
             username, password, realm = pkt.get_username(), pkt.get_passwd(), pkt.get_realm()
-            if not (username in USERS and USERS[username] == password and realm.startswith("adm")):
+            user = authenticate(username=username, password=password)
+            if not (user and user.is_active and ("adm" not in realm or user.is_staff)):
                 raise Exception('No user found or Login denied')
             self.send_accept(pkt, socket)
         except Exception, e:
@@ -109,7 +137,7 @@ class UDPHandler(SocketServer.DatagramRequestHandler):
 
 if __name__ == "__main__":
     HOST, PORT = "", 1812
-    server = SocketServer.UDPServer((HOST, PORT), UDPHandler)
+    server = SocketServer.UDPServer((HOST, PORT), RADIUSHandler)
 
     print "serving at port", PORT
     server.serve_forever()
