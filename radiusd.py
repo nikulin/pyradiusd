@@ -1,10 +1,6 @@
 #!/usr/bin/env python2.7
 #*- coding: utf-8 -*
 
-import os
-
-assert "DJANGO_SETTINGS_MODULE" in os.environ, "Need DJANGO_SETTINGS_MODULE environment variable"
-
 import argparse
 import logging
 import six
@@ -14,7 +10,27 @@ from StringIO import StringIO
 from pyrad import tools, dictionary
 from pyrad.packet import AuthPacket, AccessRequest, AccessAccept, AccessReject
 from django.conf import settings
+
+from main import settings as project_settings
+
+
+settings.configure(default_settings=project_settings,
+    LOGGING_CONFIG=None,
+    CACHES={'default': {'BACKEND': 'django.core.cache.backends.dummy.DummyCache'}},
+    DEFAULT_INDEX_TABLESPACE='',
+    DEFAULT_TABLESPACE='',
+    TRANSACTIONS_MANAGED=False,  # only for 1.6! Use the AUTOCOMMIT key in DATABASES entries instead.
+    AUTH_USER_MODEL='auth.User',
+    DATABASE_ROUTERS=[],
+    PASSWORD_HASHERS=('django.contrib.auth.hashers.PBKDF2PasswordHasher', ),
+    DEBUG=True,
+    INSTALLED_APPS=('django.contrib.auth', ),
+    MIDDLEWARE_CLASSES=('django.contrib.auth.middleware.AuthenticationMiddleware', ),
+    AUTHENTICATION_BACKENDS=('django.contrib.auth.backends.ModelBackend', ),
+)
+
 from django.contrib.auth import authenticate
+
 
 nas_secret, log_file, debug = None, 'radius.log', False
 
@@ -28,9 +44,6 @@ if not nas_secret:
     assert settings.RADIUS_SECRET, "RADIUS_SECRET should be present in settings file or in args"
     nas_secret = settings.RADIUS_SECRET
 
-INSTALLED_APPS = ('django.contrib.auth', ),
-MIDDLEWARE_CLASSES = ('django.contrib.auth.middleware.AuthenticationMiddleware', ),
-AUTHENTICATION_BACKENDS = ('django.contrib.auth.backends.ModelBackend', ),
 DICTIONARY = u'''
 ATTRIBUTE User-Name 1 string
 ATTRIBUTE User-Password 2 string encrypt=1
@@ -117,7 +130,8 @@ class RADIUSHandler(SocketServer.DatagramRequestHandler):
                 raise Exception('No user found or Login denied')
             self.send_accept(pkt, socket)
         except Exception, e:
-            radiuslog.debug("[ERROR] {0}".format(e))
+            radiuslog.debug('ERROR: {0}'.format(e))
+            radiuslog.debug("PACKET: {0}".format(pkt))
             self.send_reject(pkt, socket, str(e))
 
 
@@ -127,3 +141,4 @@ if __name__ == "__main__":
 
     print "serving at port", PORT
     server.serve_forever()
+
